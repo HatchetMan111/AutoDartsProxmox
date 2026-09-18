@@ -1,0 +1,14 @@
+[Unit]
+Description=darts-caller (Autodarts headless caller, Web-UI :8079)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@CALLER_DIR@
+ExecStart=@CALLER_DIR@/darts-caller -B @BOARD_ID@ -M @CALLER_DIR@/media -MS @CALLER_DIR@/media-shared -DEB 1
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target

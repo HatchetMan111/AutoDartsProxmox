@@ -8,10 +8,13 @@ APP="${APP:-autodarts}"
 MANAGER_PORT="${MANAGER_PORT:-8080}"
 BOARD_PORT="${BOARD_PORT:-3180}"
 CALLER_PORT="${CALLER_PORT:-8079}"
+BOARD_ID="${BOARD_ID:-}"   # leer = Caller ohne -B installieren, spaeter nachtragbar
 DARTS_HUB_DIR="${DARTS_HUB_DIR:-/opt/darts-hub}"
+CALLER_DIR="${CALLER_DIR:-/opt/darts-caller}"
 MANAGER_DIR="${MANAGER_DIR:-/opt/autodarts-manager}"
+BOARD_ID_FILE="${BOARD_ID_FILE:-/etc/autodarts/board-id}"
 REPO_RAW="${REPO_RAW:-https://raw.githubusercontent.com/HatchetMan111/AutoDartsProxmox/main}"
-MANAGER_VERSION="${MANAGER_VERSION:-1.0.0}"
+MANAGER_VERSION="${MANAGER_VERSION:-1.1.0}"
 
 log()  { echo "[setup] $*"; }
 fail() {
@@ -30,6 +33,14 @@ export DEBIAN_FRONTEND=noninteractive
 
 log "== AutoDarts Container-Setup v${MANAGER_VERSION} =="
 log "APP=${APP} MANAGER_PORT=${MANAGER_PORT} DARTS_HUB_DIR=${DARTS_HUB_DIR}"
+if [ -n "${BOARD_ID}" ]; then
+  log "Board-ID via ENV gesetzt (${#BOARD_ID} Zeichen)."
+elif [ -f "${BOARD_ID_FILE}" ] && [ -s "${BOARD_ID_FILE}" ]; then
+  BOARD_ID="$(tr -d ' \t\r\n' < "${BOARD_ID_FILE}")"
+  log "Board-ID aus ${BOARD_ID_FILE} uebernommen."
+else
+  log "Keine Board-ID (ENV/Datei leer) — Caller wird vorbereitet, aber nicht mit -B gestartet."
+fi
 
 log "(1/6) APT-Abhaengigkeiten installieren ..."
 apt-get update
@@ -64,6 +75,30 @@ chmod +x "${DARTS_HUB_DIR}/darts-hub" || true
 ls -l "${DARTS_HUB_DIR}/darts-hub"
 log "darts-hub OK."
 
+log "(3b/6) darts-caller (headless) installieren nach ${CALLER_DIR} ..."
+mkdir -p "${CALLER_DIR}/media" "${CALLER_DIR}/media-shared"
+CALLER_URL="https://github.com/Peschi90/darts-caller/releases/latest/download/darts-caller-linux"
+if curl -fSL "${CALLER_URL}" -o "${CALLER_DIR}/darts-caller"; then
+  chmod +x "${CALLER_DIR}/darts-caller"
+  ls -l "${CALLER_DIR}/darts-caller"
+  log "darts-caller OK."
+else
+  echo "[setup][FEHLER] darts-caller Download fehlgeschlagen: ${CALLER_URL}" >&2
+  echo "[setup][FEHLER] Pruefe Netzwerk/DNS oder Release-Asset-Namen." >&2
+  exit 1
+fi
+
+log "(3c/6) Board-ID preseeden nach ${BOARD_ID_FILE} ..."
+mkdir -p "$(dirname "${BOARD_ID_FILE}")"
+if [ -n "${BOARD_ID}" ]; then
+  printf '%s' "${BOARD_ID}" > "${BOARD_ID_FILE}"
+  chmod 600 "${BOARD_ID_FILE}"
+  log "Board-ID gespeichert."
+else
+  touch "${BOARD_ID_FILE}"; chmod 600 "${BOARD_ID_FILE}"
+  log "Board-ID leer — Datei angelegt, spaeter befuellen: echo DEINE_ID > ${BOARD_ID_FILE} + Re-Run."
+fi
+
 log "(4/6) Manager-Web-UI installieren nach ${MANAGER_DIR} ..."
 mkdir -p "${MANAGER_DIR}"
 if [ -f "./manager.py" ]; then
@@ -78,9 +113,9 @@ python3 -m py_compile "${MANAGER_DIR}/manager.py"
 log "manager.py OK."
 
 log "(5/6) systemd-Units installieren ..."
-for unit in autodarts-manager.service darts-hub.service; do
+for unit in autodarts-manager.service darts-hub.service darts-caller.service; do
   SRC=""
-  for cand in "./${unit}" "/tmp/${unit}"; do
+  for cand in "./${unit}" "/tmp/${unit}" "/tmp/autodarts-install/${unit}"; do
     if [ -f "${cand}" ]; then SRC="${cand}"; break; fi
   done
   if [ -z "${SRC}" ]; then
@@ -91,14 +126,27 @@ for unit in autodarts-manager.service darts-hub.service; do
   fi
 done
 # Platzhalter in Units mit echten Pfaden/Ports fuellen
-sed -i "s|@MANAGER_DIR@|${MANAGER_DIR}|g; s|@DARTS_HUB_DIR@|${DARTS_HUB_DIR}|g; s|@MANAGER_PORT@|${MANAGER_PORT}|g; s|@BOARD_PORT@|${BOARD_PORT}|g; s|@CALLER_PORT@|${CALLER_PORT}|g" \
-  /etc/systemd/system/autodarts-manager.service /etc/systemd/system/darts-hub.service
+EFFECTIVE_BOARD_ID="${BOARD_ID:-YOUR_BOARD_ID}"
+sed -i "s|@MANAGER_DIR@|${MANAGER_DIR}|g; s|@DARTS_HUB_DIR@|${DARTS_HUB_DIR}|g; s|@CALLER_DIR@|${CALLER_DIR}|g; s|@MANAGER_PORT@|${MANAGER_PORT}|g; s|@BOARD_PORT@|${BOARD_PORT}|g; s|@CALLER_PORT@|${CALLER_PORT}|g; s|@BOARD_ID@|${EFFECTIVE_BOARD_ID}|g" \
+  /etc/systemd/system/autodarts-manager.service /etc/systemd/system/darts-hub.service /etc/systemd/system/darts-caller.service
 systemctl daemon-reload
 systemctl enable autodarts-manager.service
 # darts-hub braucht Display/GUI — Service wird installiert aber nur gestartet wenn Binary lauffaehig;
 # Manager ist der garantierte Web-Endpoint fuer die Verifikation.
 systemctl enable darts-hub.service || true
 systemctl restart autodarts-manager.service
+# darts-caller nur mit echter Board-ID starten, sonst Service anlegen aber stoppen lassen
+if [ -n "${BOARD_ID}" ] && [ "${BOARD_ID}" != "YOUR_BOARD_ID" ]; then
+  systemctl enable darts-caller.service
+  if ! systemctl restart darts-caller.service; then
+    echo "[setup][WARN] darts-caller startet nicht sofort (Erststart laedt Voice-Packs). Status:" >&2
+    systemctl status darts-caller.service --no-pager --full 2>&1 | head -n 30 >&2 || true
+  fi
+else
+  systemctl enable darts-caller.service || true
+  systemctl stop darts-caller.service || true
+  log "darts-caller ohne Board-ID vorbereitet (gestoppt). Nach Nachtragen Re-Run ausfuehren."
+fi
 # darts-hub Start nicht hart failen lassen (headless ohne X kann GUI crashen) — Status loggen
 if ! systemctl restart darts-hub.service; then
   echo "[setup][WARN] darts-hub.service startet nicht (erwartbar headless ohne Display). Manager laeuft trotzdem." >&2
@@ -126,6 +174,11 @@ done
 CT_IP="$(hostname -I | awk '{print $1}')"
 echo "CT-IP: ${CT_IP}"
 echo "Manager: http://${CT_IP}:${MANAGER_PORT} (Health: /health, Status: /api/status)"
-echo "Board-Manager (nach Caller-Start): http://${CT_IP}:${BOARD_PORT}"
-echo "Caller Device-Link: http://${CT_IP}:${CALLER_PORT}"
+if [ -n "${BOARD_ID}" ] && [ "${BOARD_ID}" != "YOUR_BOARD_ID" ]; then
+  echo "Caller Web-UI: https://${CT_IP}:${CALLER_PORT} (Login-Banner bestaetigen!)"
+  echo "Board-Manager: http://${CT_IP}:${BOARD_PORT}"
+else
+  echo "Board-ID fehlt — nachtragen, dann Re-Run:"
+  echo "  echo DEINE_BOARD_ID > ${BOARD_ID_FILE} && BOARD_ID=\$(cat ${BOARD_ID_FILE}) bash ./setup-container.sh"
+fi
 log "Setup erfolgreich."

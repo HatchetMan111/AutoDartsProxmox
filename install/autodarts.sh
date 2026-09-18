@@ -26,8 +26,11 @@ CT_PRIVILEGED="${CT_PRIVILEGED:-1}"   # 1=privilegiert (empfohlen f. USB/Video),
 CT_UNPROTECTED="${CT_UNPROTECTED:-1}" # 1=nesting=1 setzen
 
 MANAGER_PORT="${MANAGER_PORT:-8080}"  # eigene Web-UI
-BOARD_PORT="${BOARD_PORT:-3180}"      # darts-hub Board-Manager
-CALLER_PORT="${CALLER_PORT:-8079}"    # Caller Device-Link
+BOARD_PORT="${BOARD_PORT:-3180}"      # Board-Manager (Dokulink, aktiv nach Caller-Start)
+CALLER_PORT="${CALLER_PORT:-8079}"    # Caller Device-Link (Web-Caller, https)
+# Board-ID: per ENV/Flag setzbar, sonst interaktiv am Anfang abgefragt.
+# Kein API-Key noetig (neuer Device-Link-Login via :8079 bzw. auth.autodarts.io/link).
+BOARD_ID="${BOARD_ID:-}"              # z.B. "abc123..." — leer = spaeter eintragen
 # =============================================================================
 
 log() { echo "[${APP}] $*"; }
@@ -58,6 +61,39 @@ need_pve() {
 next_free_id() {
   if [ -n "${CTID:-}" ]; then echo "${CTID}"; return; fi
   pvesh get /cluster/nextid
+}
+
+# Fragt die Board-ID EINMAL am Anfang ab (现有 ENV/Flag gewinnt, sonst Prompt).
+# Ergebnis: globale Variable BOARD_ID (leer = ueberspringen, spaeter via Manager/API eintragbar).
+ask_board_id() {
+  # Flag-Parsung (kompatibel zum Einzeiler: .../autodarts.sh --board-id XYZ)
+  for arg in "$@"; do
+    case "${arg}" in
+      --board-id=*) BOARD_ID="${arg#--board-id=}" ;;
+      --board-id) shift ;;
+    esac
+  done
+  if [ -n "${BOARD_ID:-}" ]; then
+    log "Board-ID via ENV/Flag gesetzt."
+    return 0
+  fi
+  if [ -t 0 ]; then
+    echo ""
+    echo "--- AutoDarts Einrichtung ---"
+    echo "Board-ID von play.autodarts.io (Board anlegen -> ID kopieren)."
+    echo "Kein API-Key noetig (Device-Link-Login erfolgt spaeter ueber :${CALLER_PORT})."
+    echo "Leer lassen = ueberspringen (Web-UI zeigt dann nur Setup-Hinweis)."
+    printf "Board-ID (Enter = spaeter): "
+    IFS= read -r BOARD_ID || BOARD_ID=""
+    BOARD_ID="$(echo "${BOARD_ID}" | tr -d ' \t\r\n')"
+    if [ -z "${BOARD_ID}" ]; then
+      log "Keine Board-ID eingegeben — Caller wird ohne -B installiert, spaeter nachtragbar."
+    else
+      log "Board-ID erfasst (${#BOARD_ID} Zeichen)."
+    fi
+  else
+    log "Nicht-interaktiv ohne BOARD_ID — Caller wird ohne -B installiert (spaeter nachtragbar via BOARD_ID=... Re-Run)."
+  fi
 }
 
 ensure_template() {
@@ -116,7 +152,8 @@ run_setup_inside() {
   log "Kopiere Setup-Dateien in den Container ..."
   pct push "${ctid}" /dev/null /tmp/.autodarts_ping 2>/dev/null || true
   # Dateien direkt aus dem Repo in den Container laden (GitHub-first):
-  pct exec "${ctid}" -- bash -c "set -euo pipefail; apt-get update -qq; apt-get install -y -qq curl ca-certificates >/dev/null; mkdir -p /tmp/autodarts-install; cd /tmp/autodarts-install; curl -fSL '${REPO_RAW}/src/setup-container.sh' -o setup-container.sh; curl -fSL '${REPO_RAW}/src/manager.py' -o manager.py; curl -fSL '${REPO_RAW}/systemd/autodarts-manager.service' -o autodarts-manager.service; curl -fSL '${REPO_RAW}/systemd/darts-hub.service' -o darts-hub.service; chmod +x setup-container.sh; APP='${APP}' MANAGER_PORT='${MANAGER_PORT}' BOARD_PORT='${BOARD_PORT}' CALLER_PORT='${CALLER_PORT}' REPO_RAW='${REPO_RAW}' bash ./setup-container.sh"
+  # BOARD_ID wird durchgereicht und im Container nach /etc/autodarts/board-id preseeded.
+  pct exec "${ctid}" -- bash -c "set -euo pipefail; apt-get update -qq; apt-get install -y -qq curl ca-certificates >/dev/null; mkdir -p /tmp/autodarts-install; cd /tmp/autodarts-install; curl -fSL '${REPO_RAW}/src/setup-container.sh' -o setup-container.sh; curl -fSL '${REPO_RAW}/src/manager.py' -o manager.py; curl -fSL '${REPO_RAW}/systemd/autodarts-manager.service' -o autodarts-manager.service; curl -fSL '${REPO_RAW}/systemd/darts-hub.service' -o darts-hub.service; curl -fSL '${REPO_RAW}/systemd/darts-caller.service' -o darts-caller.service; chmod +x setup-container.sh; APP='${APP}' MANAGER_PORT='${MANAGER_PORT}' BOARD_PORT='${BOARD_PORT}' CALLER_PORT='${CALLER_PORT}' BOARD_ID='${BOARD_ID:-}' REPO_RAW='${REPO_RAW}' bash ./setup-container.sh"
 }
 
 verify() {
@@ -132,14 +169,38 @@ verify() {
   fi
   pct exec "${ctid}" -- curl -fsS "http://localhost:${MANAGER_PORT}/health" >/dev/null
   log "HTTP-Check localhost:${MANAGER_PORT}/health OK."
+  local caller_state
+  caller_state="$(pct exec "${ctid}" -- systemctl is-active darts-caller.service 2>&1 || true)"
+  log "systemctl is-active darts-caller: ${caller_state}"
+  if [ -n "${BOARD_ID:-}" ] && [ "${caller_state}" != "active" ]; then
+    err "WARN: Board-ID gesetzt, aber darts-caller nicht aktiv. Log:"
+    pct exec "${ctid}" -- journalctl -u darts-caller.service --no-pager -n 40 >&2 || true
+  fi
+  if [ -n "${BOARD_ID:-}" ]; then
+    if pct exec "${ctid}" -- curl -fskS "https://localhost:${CALLER_PORT}/" >/dev/null 2>&1; then
+      log "Caller Web-UI https://localhost:${CALLER_PORT}/ erreichbar."
+    else
+      log "Caller :${CALLER_PORT} noch nicht bereit (Voice-Pack-Download beim Erststart dauert) — Manager ist bereit."
+    fi
+  fi
   local ip
   ip="$(pct exec "${ctid}" -- hostname -I | awk '{print $1}')"
   echo ""
   echo "================================================================"
   echo " AutoDarts bereit! CTID=${ctid} Name=${APP} IP=${ip}"
   echo " Manager:        http://${ip}:${MANAGER_PORT}"
-  echo " Board-Manager:  http://${ip}:${BOARD_PORT} (nach Caller-Start)"
-  echo " Caller-Link:    http://${ip}:${CALLER_PORT}"
+  if [ -n "${BOARD_ID:-}" ]; then
+    echo " Caller:         https://${ip}:${CALLER_PORT} (Login-Banner bestaetigen!)"
+    echo " Board-Manager:  http://${ip}:${BOARD_PORT}"
+    echo " Naechstes:      1) Caller-URL oeffnen, Device-Link Login via"
+    echo "                    auth.autodarts.io/link bestaetigen."
+    echo "                 2) Kameras waehlen + kalibrieren, Testspiel."
+  else
+    echo " Board-ID:       NICHT gesetzt — im Container nachtragen:"
+    echo "                 pct exec ${ctid} -- bash -c 'echo DEINE_BOARD_ID > /etc/autodarts/board-id'"
+    echo "                 BOARD_ID=DEINE_BOARD_ID bash /tmp/autodarts-install/setup-container.sh"
+    echo "                 danach Caller-Login ueber https://${ip}:${CALLER_PORT}"
+  fi
   echo " Update:         pct exec ${ctid} -- bash /tmp/autodarts-install/setup-container.sh"
   echo " Deinstallieren: pct stop ${ctid} && pct destroy ${ctid}"
   echo " USB-Kameras:    Host 'lsusb -t' pruefen, dann CT config ergaenzen,"
@@ -160,6 +221,7 @@ main() {
   local ctid
   ctid="$(next_free_id)"
   log "Naechste freie CT-ID: ${ctid} | Hostname: ${APP}"
+  ask_board_id "$@"
   ensure_template
   create_container "${ctid}"
   wait_ssh_network "${ctid}"

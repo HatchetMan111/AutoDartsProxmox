@@ -15,11 +15,23 @@ Installiert wird:
 bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/AutoDartsProxmox/main/install/autodarts.sh)"
 ```
 
-Der Installer:
-- nimmt **immer die nächste freie CT-ID** (`pvesh get /cluster/nextid`, über `CTID=<id>` überschreibbar),
-- vergibt den Containernamen **`autodarts`**,
-- erstellt Standard **2 vCPU / 2 GB RAM / 8 GB Disk** (Debian 12),
-- ist **idempotent** (Setup im Container mehrfach lauffähig) und mit `set -euo pipefail` + vollständigem Fehler-Stacktrace abgesichert.
+Der Installer fragt **am Anfang einmal die Board-ID** ab (von `play.autodarts.io`, Board anlegen → ID kopieren).
+Kein API-Key nötig (neuer Device-Link-Login). Leer lassen = überspringen, später nachtragbar.
+Nicht-interaktiv / vorab setzen:
+
+```bash
+BOARD_ID=deine-board-id bash -c "$(wget -qLO - https://raw.githubusercontent.com/HatchetMan111/AutoDartsProxmox/main/install/autodarts.sh)"
+```
+
+Was danach automatisch läuft:
+- `darts-caller` (headless) als systemd-Service mit `-B <Board-ID>` → Web-UI `https://<LXC-IP>:8079`
+- Manager-Web-UI `http://<LXC-IP>:8080` zeigt Board-Status (maskiert), Service-Status, USB/Video-Geräte
+- Am Ende prüft der Installer: Manager `:8080` aktiv + Caller `:8079` erreichbar (wenn Board-ID gesetzt)
+
+Danach bleiben nur noch 3 Klicks:
+1. Caller-URL öffnen, Zertifikatswarnung bestätigen, **Device-Link Login** via `auth.autodarts.io/link` freigeben
+2. Kameras wählen + kalibrieren, Testspiel
+3. USB-Kameras per Passthrough in den Container reichen (ohne `/dev/video*` kein Scoring)
 
 ### Optionen per ENV
 

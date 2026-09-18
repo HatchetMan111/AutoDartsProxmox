@@ -18,7 +18,9 @@ MANAGER_PORT = int(os.environ.get("MANAGER_PORT", "8080"))
 BOARD_PORT = int(os.environ.get("BOARD_PORT", "3180"))
 CALLER_PORT = int(os.environ.get("CALLER_PORT", "8079"))
 DARTS_HUB_DIR = os.environ.get("DARTS_HUB_DIR", "/opt/darts-hub")
-MANAGER_VERSION = os.environ.get("MANAGER_VERSION", "1.0.0")
+CALLER_DIR = os.environ.get("CALLER_DIR", "/opt/darts-caller")
+BOARD_ID_FILE = os.environ.get("BOARD_ID_FILE", "/etc/autodarts/board-id")
+MANAGER_VERSION = os.environ.get("MANAGER_VERSION", "1.1.0")
 
 
 def run(cmd, timeout=5):
@@ -67,11 +69,21 @@ def container_ip():
 
 def status_payload():
     hub_bin = os.path.join(DARTS_HUB_DIR, "darts-hub")
+    caller_bin = os.path.join(CALLER_DIR, "darts-caller")
+    board_id = ""
+    try:
+        with open(BOARD_ID_FILE, encoding="utf-8") as f:
+            board_id = f.read().strip()
+    except Exception:
+        board_id = ""
+    masked = ("…" + board_id[-4:]) if len(board_id) > 4 else ("gesetzt" if board_id else "")
     return {
         "manager": {"version": MANAGER_VERSION, "port": MANAGER_PORT},
         "container_ip": container_ip(),
+        "board": {"configured": bool(board_id), "masked": masked, "file": BOARD_ID_FILE},
         "services": {
             "autodarts-manager": service_state("autodarts-manager"),
+            "darts-caller": service_state("darts-caller"),
             "darts-hub": service_state("darts-hub"),
         },
         "darts_hub": {
@@ -79,11 +91,16 @@ def status_payload():
             "binary_present": os.path.isfile(hub_bin),
             "binary_executable": os.access(hub_bin, os.X_OK),
         },
+        "darts_caller": {
+            "dir": CALLER_DIR,
+            "binary_present": os.path.isfile(caller_bin),
+            "binary_executable": os.access(caller_bin, os.X_OK),
+        },
         "video_devices": list_video_devices(),
         "usb": usb_list(),
         "links": {
             "board_manager": f"http://{container_ip()}:{BOARD_PORT}",
-            "caller_link": f"http://{container_ip()}:{CALLER_PORT}",
+            "caller_link": f"https://{container_ip()}:{CALLER_PORT}",
         },
     }
 
@@ -100,17 +117,16 @@ a{color:#7cc4ff}code{background:#0a0c10;padding:.15rem .4rem;border-radius:6px}
 <p class="small">Laeuft lokal im LXC-Container. Version: __VERSION__ | IP: __IP__</p>
 <div class="card"><h2>Direkt-Links</h2>
 <p><a class="btn" href="__BOARD_URL__">Board-Manager (:3180)</a>
-<a class="btn" href="__CALLER_URL__">Caller Device-Link (:8079)</a>
+<a class="btn" href="__CALLER_URL__">Caller Login (:8079, https)</a>
 <a class="btn" href="/api/status">JSON-Status</a>
 <a class="btn" href="/health">Health</a></p>
-<p class="small">Board-Manager erscheint erst, wenn <code>darts-caller</code> via darts-hub gestartet und mit Board-ID/API-Key konfiguriert ist.</p></div>
-<div class="card"><h2>Naechste Schritte</h2><ol>
-<li>Auf <code>play.autodarts.io</code> Account + Board anlegen, Board-ID &amp; API-Key kopieren.</li>
-<li>Per SSH in den Container oder via darts-hub Binary: Profil <code>darts-caller</code> starten.</li>
-<li>Device-Link Login: <code>auth.autodarts.io/link</code> oder Handy-URL <code>https://&lt;PC-IP&gt;:8079</code>.</li>
+<p class="small">__BOARD_HINT__</p></div>
+<div class="card"><h2>Naechste Schritte (reduziert)</h2><ol>
+<li>Caller-URL oeffnen (<code>https://&lt;CT-IP&gt;:8079</code>, Zertifikatswarnung bestaetigen) und Device-Link Login via <code>auth.autodarts.io/link</code> freigeben.</li>
 <li>Im Board-Manager Kameras waehlen, kalibrieren, Testspiel starten.</li>
-<li>USB-Kameras am Proxmox-Host per Passthrough in diesen Container reichen (siehe README).</li>
-</ol></div>
+<li>USB-Kameras am Proxmox-Host per Passthrough in diesen Container reichen (siehe README) — ohne <code>/dev/video*</code> kein Scoring.</li>
+</ol>
+<p class="small">Board-ID wurde bei der Installation abgefragt und liegt in <code>/etc/autodarts/board-id</code>. Nachtragen: <code>echo DEINE_ID &gt; /etc/autodarts/board-id</code> + Setup-Re-Run.</p></div>
 <div class="card"><h2>Live-Status</h2><pre id="st">lade …</pre></div>
 <script>fetch('/api/status').then(r=>r.text()).then(t=>document.getElementById('st').textContent=t).catch(e=>document.getElementById('st').textContent='Fehler: '+e)</script>
 </body></html>"""
@@ -139,10 +155,16 @@ class Handler(BaseHTTPRequestHandler):
                 self._send(200, json.dumps(status_payload(), indent=2, ensure_ascii=False), "application/json; charset=utf-8")
             elif path in ("/", "/index.html"):
                 ip = container_ip()
+                st = status_payload()
+                if st["board"]["configured"]:
+                    hint = f"Board {st['board']['masked']} konfiguriert — nur noch Caller-Login + Kameras."
+                else:
+                    hint = "Keine Board-ID hinterlegt — nachtragen (siehe unten), sonst bleibt Caller gestoppt."
                 html = (DASHBOARD.replace("__VERSION__", MANAGER_VERSION)
                         .replace("__IP__", ip)
                         .replace("__BOARD_URL__", f"http://{ip}:{BOARD_PORT}")
-                        .replace("__CALLER_URL__", f"http://{ip}:{CALLER_PORT}"))
+                        .replace("__CALLER_URL__", f"https://{ip}:{CALLER_PORT}")
+                        .replace("__BOARD_HINT__", hint))
                 self._send(200, html)
             else:
                 self._send(404, "Not found", "text/plain")
