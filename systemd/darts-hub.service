@@ -1,0 +1,17 @@
+[Unit]
+Description=darts-hub (Autodarts Extensions Manager)
+After=network-online.target autodarts-manager.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+WorkingDirectory=@DARTS_HUB_DIR@
+ExecStart=@DARTS_HUB_DIR@/darts-hub
+Restart=always
+RestartSec=5
+# Headless-Hinweis: darts-hub ist eine Avalonia-GUI-App. Im LXC ohne X-Server
+# kann sie crashen — das ist OK, der Manager auf :@MANAGER_PORT@ bleibt erreichbar
+# und darts-caller/cam-loader koennen bei Bedarf als eigene Services ergaenzt werden.
+
+[Install]
+WantedBy=multi-user.target
