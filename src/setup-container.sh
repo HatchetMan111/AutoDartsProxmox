@@ -77,14 +77,25 @@ log "darts-hub OK."
 
 log "(3b/6) darts-caller (headless) installieren nach ${CALLER_DIR} ..."
 mkdir -p "${CALLER_DIR}/media" "${CALLER_DIR}/media-shared"
-CALLER_URL="https://github.com/Peschi90/darts-caller/releases/latest/download/darts-caller-linux"
+# Asset-Namen je Arch (Stand v3.x, per GitHub-API verifiziert):
+#   x86_64  -> "darts-caller"         (Linux x64)
+#   aarch64 -> "darts-caller-arm64"   (Linux ARM64)
+# Es gibt KEIN "darts-caller-linux" und KEIN arm32-Asset.
+case "${ARCH}" in
+  x86_64|amd64) CALLER_ASSET="darts-caller" ;;
+  aarch64|arm64) CALLER_ASSET="darts-caller-arm64" ;;
+  *) echo "[setup][FEHLER] darts-caller hat kein Release-Asset fuer '${ARCH}' (nur x64 + arm64)." >&2; exit 1 ;;
+esac
+CALLER_URL="https://github.com/Peschi90/darts-caller/releases/latest/download/${CALLER_ASSET}"
+log "Caller-Asset: ${CALLER_ASSET}"
 if curl -fSL "${CALLER_URL}" -o "${CALLER_DIR}/darts-caller"; then
   chmod +x "${CALLER_DIR}/darts-caller"
   ls -l "${CALLER_DIR}/darts-caller"
   log "darts-caller OK."
 else
   echo "[setup][FEHLER] darts-caller Download fehlgeschlagen: ${CALLER_URL}" >&2
-  echo "[setup][FEHLER] Pruefe Netzwerk/DNS oder Release-Asset-Namen." >&2
+  echo "[setup][FEHLER] curl-Exit: $? — stderr/stdout siehe oben." >&2
+  echo "[setup][FEHLER] Fallback: Asset-Namen unter https://github.com/Peschi90/darts-caller/releases/latest pruefen." >&2
   exit 1
 fi
 
